@@ -19,42 +19,18 @@ export default class PythonRunner {
 
   #runtime = null
 
+  #handlerName = null
+
+  #handlerPath = null
+
   constructor(funOptions, env) {
     const { handler, runtime } = funOptions
     const [handlerPath, handlerName] = splitHandlerPathAndName(handler)
 
     this.#env = env
     this.#runtime = platform() === 'win32' ? 'python.exe' : runtime
-
-    if (process.env.VIRTUAL_ENV) {
-      const runtimeDir = platform() === 'win32' ? 'Scripts' : 'bin'
-
-      process.env.PATH = [
-        pathJoin(process.env.VIRTUAL_ENV, runtimeDir),
-        delimiter,
-        process.env.PATH,
-      ].join('')
-    }
-
-    const [pythonExecutable] = this.#runtime.split('.')
-
-    this.#handlerProcess = spawn(
-      pythonExecutable,
-      [
-        '-u',
-        join(import.meta.url, 'invoke.py'),
-        relative(cwd(), handlerPath),
-        handlerName,
-      ],
-      {
-        env: assign(process.env, this.#env),
-        shell: true,
-      },
-    )
-
-    this.#handlerProcess.stdout.readline = createInterface({
-      input: this.#handlerProcess.stdout,
-    })
+    this.#handlerName = handlerName
+    this.#handlerPath = handlerPath
   }
 
   // () => void
@@ -98,6 +74,36 @@ export default class PythonRunner {
   // https://github.com/serverless/serverless/blob/v1.50.0/lib/plugins/aws/invokeLocal/invoke.py
   async run(event, context) {
     return new Promise((res, rej) => {
+      if (process.env.VIRTUAL_ENV) {
+        const runtimeDir = platform() === 'win32' ? 'Scripts' : 'bin'
+
+        process.env.PATH = [
+          pathJoin(process.env.VIRTUAL_ENV, runtimeDir),
+          delimiter,
+          process.env.PATH,
+        ].join('')
+      }
+
+      const [pythonExecutable] = this.#runtime.split('.')
+
+      const handlerProcess = spawn(
+        pythonExecutable,
+        [
+          '-u',
+          join(import.meta.url, 'invoke.py'),
+          relative(cwd(), this.#handlerPath),
+          this.#handlerName,
+        ],
+        {
+          env: assign(process.env, this.#env),
+          shell: true,
+        },
+      )
+
+      handlerProcess.stdout.readline = createInterface({
+        input: handlerProcess.stdout,
+      })
+
       const input = stringify({
         context,
         event,
@@ -113,21 +119,23 @@ export default class PythonRunner {
         try {
           const parsed = this.#parsePayload(line.toString())
           if (parsed) {
-            this.#handlerProcess.stdout.readline.removeListener('line', onLine)
-            this.#handlerProcess.stderr.removeListener('data', onErr)
+            handlerProcess.stdout.readline.removeListener('line', onLine)
+            handlerProcess.stderr.removeListener('data', onErr)
             res(parsed)
           }
         } catch (err) {
           rej(err)
+        } finally {
+          handlerProcess.kill()
         }
       }
 
-      this.#handlerProcess.stdout.readline.on('line', onLine)
-      this.#handlerProcess.stderr.on('data', onErr)
+      handlerProcess.stdout.readline.on('line', onLine)
+      handlerProcess.stderr.on('data', onErr)
 
       nextTick(() => {
-        this.#handlerProcess.stdin.write(input)
-        this.#handlerProcess.stdin.write('\n')
+        handlerProcess.stdin.write(input)
+        handlerProcess.stdin.write('\n')
       })
     })
   }
